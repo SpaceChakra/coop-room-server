@@ -1,0 +1,10 @@
+{
+  "name": "spacechakra-coop-room-server",
+  "version": "1.0.0",
+  "description": "Host / join-by-code / quick-match WebSocket relay for 2-player browser games.",
+  "type": "module",
+  "license": "MIT",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "dependencies": { "ws": "^8.18.0" }
+}

@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Co-op Room Server demo — SpaceChakra</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #090b14; color: #dce4f5; font: 15px/1.4 ui-monospace, Consolas, monospace; overflow: hidden; }
+    #lobby { position: fixed; inset: 0; display: grid; place-items: center; background: rgba(9,11,20,.92); }
+    #lobby div { text-align: center; }
+    h1 { color: #35c8ff; letter-spacing: 2px; font-style: italic; }
+    button, input { font: inherit; background: #131826; color: #dce4f5; border: 1px solid #2a3350; padding: 9px 14px; margin: 4px; border-radius: 6px; }
+    button { cursor: pointer; } button:hover { border-color: #35c8ff; }
+    input { width: 80px; text-transform: uppercase; text-align: center; letter-spacing: 3px; }
+    #msg { min-height: 24px; margin-top: 12px; color: #ffb347; }
+    #code { font-size: 44px; letter-spacing: 10px; color: #ff5a3c; }
+    #hud { position: fixed; left: 12px; top: 10px; }
+    a { color: #35c8ff; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud"></div>
+<div id="lobby"><div>
+  <h1>CO-OP ROOMS</h1>
+  <button id="host">Host</button>
+  <input id="joinCode" maxlength="4" placeholder="CODE"><button id="join">Join</button>
+  <button id="quick">Quick match</button>
+  <div id="code"></div>
+  <div id="msg">Open this page in two tabs (or two computers) to try it.</div>
+  <p style="opacity:.6">from <a href="https://patreon.com/spacechakra" target="_blank" rel="noopener">SpaceChakra</a> · MIT</p>
+</div></div>
+<script type="module">
+  import { NetClient, Smoothed, r2 } from './net.js';
+
+  const $ = (id) => document.getElementById(id);
+  const net = new NetClient();
+  const say = (t) => { $('msg').textContent = t; };
+
+  // --- lobby ---
+  await net.connect().catch(() => say('Could not reach the server. Run `npm start` and open http://localhost:3000'));
+  $('host').onclick = () => net.host();
+  $('join').onclick = () => net.join($('joinCode').value.trim());
+  $('quick').onclick = () => { net.quick(); say('Searching…'); };
+  net.onHosted = (code) => { $('code').textContent = code; say('Give this code to your partner.'); };
+  net.onQueued = () => say('Waiting for another player…');
+  net.onJoinFailed = (why) => say(why);
+  net.onPeerJoined = (role) => { $('lobby').style.display = 'none'; start(role === 'host'); };
+  net.onPeerLeft = () => { $('lobby').style.display = ''; $('code').textContent = ''; say('Partner left.'); running = false; };
+
+  // --- a tiny co-op game: both players collect the same coins; the host owns the coins and score ---
+  const cv = $('c'), g = cv.getContext('2d');
+  const fit = () => { cv.width = innerWidth; cv.height = innerHeight; };
+  fit(); addEventListener('resize', fit);
+  const keys = new Set();
+  addEventListener('keydown', (e) => keys.add(e.key.toLowerCase()));
+  addEventListener('keyup', (e) => keys.delete(e.key.toLowerCase()));
+
+  let running = false, isHost = false;
+  const me = { x: 0.3, y: 0.5 }, them = { x: new Smoothed(0.7), y: new Smoothed(0.5) };
+  let coin = { x: 0.5, y: 0.3 }, score = 0;
+
+  net.onMessage = (m) => {
+    if (m.type === 'me') { them.x.push(m.x); them.y.push(m.y); }
+    if (m.type === 'world') { coin = m.coin; score = m.score; }   // guest ← host snapshot
+    if (m.type === 'grab' && isHost) grab();                        // host ← guest claims a coin
+  };
+  function grab() { score++; coin = { x: 0.1 + Math.random() * 0.8, y: 0.1 + Math.random() * 0.8 }; }
+
+  function start(host) {
+    isHost = host; running = true;
+    me.x = host ? 0.3 : 0.7;
+    let last = performance.now();
+    const loop = (now) => {
+      if (!running) return;
+      const dt = Math.min(0.05, (now - last) / 1000); last = now;
+      const sp = 0.45 * dt;
+      if (keys.has('a') || keys.has('arrowleft')) me.x -= sp;
+      if (keys.has('d') || keys.has('arrowright')) me.x += sp;
+      if (keys.has('w') || keys.has('arrowup')) me.y -= sp;
+      if (keys.has('s') || keys.has('arrowdown')) me.y += sp;
+      me.x = Math.min(1, Math.max(0, me.x)); me.y = Math.min(1, Math.max(0, me.y));
+
+      // Each side streams its own player at 20 Hz.
+      net.sendThrottled('me', { x: r2(me.x), y: r2(me.y) }, dt, 20);
+
+      // Coin pickup: the host decides; the guest asks.
+      if (Math.hypot(me.x - coin.x, me.y - coin.y) < 0.04) {
+        if (isHost) grab(); else { net.send('grab'); coin = { x: -1, y: -1 }; }
+      }
+      if (isHost) net.sendThrottled('world', { coin, score }, dt, 10);
+
+      draw(dt);
+      requestAnimationFrame(loop);
+    };
+    requestAnimationFrame(loop);
+  }
+
+  function draw(dt) {
+    const W = cv.width, H = cv.height;
+    g.fillStyle = '#090b14'; g.fillRect(0, 0, W, H);
+    g.fillStyle = '#ffd36b'; g.beginPath(); g.arc(coin.x * W, coin.y * H, 10, 0, Math.PI * 2); g.fill();
+    const dot = (x, y, c, label) => {
+      g.fillStyle = c; g.beginPath(); g.arc(x * W, y * H, 16, 0, Math.PI * 2); g.fill();
+      g.fillStyle = '#fff'; g.fillText(label, x * W - 12, y * H - 22);
+    };
+    dot(them.x.get(dt), them.y.get(dt), isHost ? '#ff5a3c' : '#35c8ff', 'P2');
+    dot(me.x, me.y, isHost ? '#35c8ff' : '#ff5a3c', 'YOU');
+    $('hud').textContent = `room ${net.code} · you are ${net.role} · shared score ${score} · WASD to move`;
+  }
+</script>
+</body>
+</html>
